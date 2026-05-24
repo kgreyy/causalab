@@ -27,6 +27,26 @@ DTYPE_MAP = {
 }
 
 
+def _build_quantization_config(quantization: str | None):
+    """Build a BitsAndBytesConfig from a short string: 'int4' or 'int8'."""
+    if quantization is None:
+        return None
+    try:
+        from transformers import BitsAndBytesConfig
+    except ImportError as exc:
+        raise ImportError(
+            "bitsandbytes is required for quantization. Install it with: "
+            "pip install bitsandbytes"
+        ) from exc
+    if quantization == "int4":
+        return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
+    if quantization == "int8":
+        return BitsAndBytesConfig(load_in_8bit=True)
+    raise ValueError(
+        f"Unknown quantization {quantization!r}. Supported: 'int4', 'int8'."
+    )
+
+
 def load_pipeline(
     model_name: str,
     task: "Task",
@@ -34,32 +54,44 @@ def load_pipeline(
     device: str | None = None,
     dtype: str | None = None,
     eager_attn: bool | None = None,
+    quantization: str | None = None,
 ):
-    """Load an ``LMPipeline`` from explicit parameters."""
+    """Load an ``LMPipeline`` from explicit parameters.
+
+    Pass ``quantization='int4'`` or ``quantization='int8'`` to load a
+    BitsAndBytes-quantized model. Requires ``bitsandbytes`` to be installed.
+    Quantized models use ``device_map='auto'`` and ignore the ``dtype`` kwarg.
+    """
     from causalab.neural.pipeline import LMPipeline, resolve_device
 
-    # Use device_map="auto" for multi-GPU sharding when device is unspecified or "auto"
-    use_device_map = (
-        device is None or device == "auto"
-    ) and torch.cuda.device_count() > 1
+    quantization_config = _build_quantization_config(quantization)
+
+    # Quantized models require device_map (handled inside LMPipeline._setup_model).
+    # For unquantized multi-GPU setups, use device_map="auto" for sharding.
+    use_device_map = quantization_config is not None or (
+        (device is None or device == "auto") and torch.cuda.device_count() > 1
+    )
 
     model_kwargs: dict[str, Any]
     if use_device_map:
         model_kwargs = {"device_map": "auto"}
         logger.info(
-            "Loading model: %s (device_map=auto, %d GPUs)",
+            "Loading model: %s (device_map=auto, %d GPUs, quantization=%s)",
             model_name,
             torch.cuda.device_count(),
+            quantization or "none",
         )
     else:
         resolved_device = resolve_device(device)
         model_kwargs = {"device": resolved_device}
         logger.info("Loading model: %s (device=%s)", model_name, resolved_device)
 
-    if dtype:
+    if dtype and quantization_config is None:
         model_kwargs["dtype"] = DTYPE_MAP.get(dtype, torch.bfloat16)
     if eager_attn is False:
         model_kwargs["eager_attn"] = False
+    if quantization_config is not None:
+        model_kwargs["quantization_config"] = quantization_config
 
     pipeline = LMPipeline(model_name, max_new_tokens=max_new_tokens, **model_kwargs)
 

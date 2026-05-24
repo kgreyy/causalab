@@ -193,7 +193,11 @@ class LMPipeline(Pipeline):
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_or_name, token=hf_token
             )
+            quantization_config = self._init_extra_kwargs.get("quantization_config")
             device_map = self._init_extra_kwargs.get("device_map")
+            # BitsAndBytes quantization requires device_map; default to "auto"
+            if quantization_config is not None and device_map is None:
+                device_map = "auto"
             pretrained_kwargs: dict[str, Any] = dict(
                 config=self._init_extra_kwargs.get("config"),
                 token=hf_token,
@@ -201,11 +205,16 @@ class LMPipeline(Pipeline):
             )
             if device_map is not None:
                 pretrained_kwargs["device_map"] = device_map
+            if quantization_config is not None:
+                pretrained_kwargs["quantization_config"] = quantization_config
+                # dtype is managed by the quantization library; let transformers decide
+                pretrained_kwargs.pop("dtype", None)
             if self.load_weights:
                 self.model = AutoModelForCausalLM.from_pretrained(  # type: ignore[call-arg]
                     self.model_or_name, **pretrained_kwargs
                 )
-                if device_map is None:
+                # Skip manual .to(device) when device_map or quantization handles placement
+                if device_map is None and quantization_config is None:
                     self.model = self.model.to(device=device)
                 if self._init_extra_kwargs.get("eager_attn", True):
                     if hasattr(self.model.config, "_attn_implementation"):
